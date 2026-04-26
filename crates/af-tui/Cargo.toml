@@ -1,0 +1,16 @@
+[package]
+name        = "af-tui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+af-core   = { workspace = true }
+af-api    = { workspace = true }
+af-audio  = { workspace = true }
+af-daemon = { workspace = true }
+ratatui   = { workspace = true }
+crossterm = { workspace = true }
+tokio     = { workspace = true }
+futures   = { workspace = true }
+anyhow    = { workspace = true }
+tracing   = { workspace = true }

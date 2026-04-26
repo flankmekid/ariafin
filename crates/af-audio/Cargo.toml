@@ -1,0 +1,15 @@
+[package]
+name        = "af-audio"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+af-core   = { workspace = true }
+anyhow    = { workspace = true }
+thiserror = { workspace = true }
+tokio     = { workspace = true }
+reqwest   = { workspace = true }
+futures   = { workspace = true }
+tracing   = { workspace = true }
+symphonia = { workspace = true }
+cpal      = { workspace = true }

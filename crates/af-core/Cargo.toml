@@ -1,0 +1,12 @@
+[package]
+name        = "af-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde     = { workspace = true }
+anyhow    = { workspace = true }
+thiserror = { workspace = true }
+ron       = { workspace = true }
+dirs      = { workspace = true }
+rusqlite  = { workspace = true }

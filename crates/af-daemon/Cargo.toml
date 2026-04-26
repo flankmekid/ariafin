@@ -1,0 +1,10 @@
+[package]
+name        = "af-daemon"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+af-core = { workspace = true }
+tokio   = { workspace = true }
+anyhow  = { workspace = true }
+tracing = { workspace = true }

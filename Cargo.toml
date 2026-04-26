@@ -1,0 +1,65 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/af-core",
+    "crates/af-api",
+    "crates/af-audio",
+    "crates/af-tui",
+    "crates/af-daemon",
+    "crates/af-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["ariafin contributors"]
+license = "MIT"
+
+[workspace.dependencies]
+# Internal crates
+af-core   = { path = "crates/af-core" }
+af-api    = { path = "crates/af-api" }
+af-audio  = { path = "crates/af-audio" }
+af-tui    = { path = "crates/af-tui" }
+af-daemon = { path = "crates/af-daemon" }
+
+# Async
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Config
+ron  = "0.8"
+dirs = "5"
+
+# Error handling
+anyhow    = "1"
+thiserror = "2"
+
+# Logging
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# TUI
+ratatui   = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+# HTTP (Phase 2+)
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+
+# Database (Phase 2+)
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Audio (Phase 3+)
+symphonia = { version = "0.5", features = ["all"] }
+cpal      = { version = "0.15" }
+
+# Async utilities
+async-trait  = "0.1"
+futures      = "0.3"
+urlencoding  = "2"
+
+# CLI
+clap = { version = "4", features = ["derive"] }

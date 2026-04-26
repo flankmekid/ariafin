@@ -1,0 +1,14 @@
+[package]
+name        = "af-api"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+af-core     = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+anyhow      = { workspace = true }
+thiserror   = { workspace = true }
+reqwest      = { workspace = true }
+async-trait  = { workspace = true }
+urlencoding  = { workspace = true }
