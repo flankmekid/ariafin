@@ -77,6 +77,8 @@ config is stored at:
 
 settings edited in the **Settings** tab are saved automatically.
 
+**Security note:** Credentials (authentication tokens and user IDs) are stored in the system keyring (e.g., Windows Credential Manager, macOS Keychain, Linux Secret Service) rather than in the config file. On first launch after updating, existing credentials will be migrated automatically.
+
 ## dependencies
 
 - [ratatui](https://github.com/ratatui-org/ratatui) for the terminal ui

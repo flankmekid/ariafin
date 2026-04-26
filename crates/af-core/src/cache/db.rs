@@ -67,8 +67,9 @@ pub struct CacheDb {
 
 impl CacheDb {
     pub fn open(server_id: &str) -> Result<Self> {
-        let path = cache_db_path();
-        std::fs::create_dir_all(path.parent().expect("db path has no parent"))
+        let path = cache_db_path()?;
+        std::fs::create_dir_all(path.parent()
+            .ok_or_else(|| anyhow::anyhow!("Database path has no parent directory"))?)
             .context("failed to create cache directory")?;
 
         let conn = Connection::open(&path)
@@ -272,5 +273,174 @@ impl CacheDb {
             params![self.server_id],
             |r| r.get(0),
         )?)
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{AlbumId, ArtistId, CoverArtId, TrackId};
+    use rusqlite::Connection;
+
+    fn open_in_memory(server_id: &str) -> CacheDb {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        CacheDb {
+            conn,
+            server_id: server_id.to_string(),
+        }
+    }
+
+    fn sample_artist(id: &str, name: &str) -> Artist {
+        Artist {
+            id: ArtistId(id.to_string()),
+            name: name.to_string(),
+            sort_name: None,
+            album_count: 1,
+            cover_art_id: None,
+        }
+    }
+
+    fn sample_album(id: &str, title: &str, artist_id: Option<&str>) -> Album {
+        Album {
+            id: AlbumId(id.to_string()),
+            title: title.to_string(),
+            sort_title: None,
+            artist_id: artist_id.map(|s| ArtistId(s.to_string())),
+            artist_name: artist_id.map(|_| "Test Artist".to_string()),
+            year: Some(2024),
+            track_count: 2,
+            duration_secs: None,
+            cover_art_id: None,
+            genre: None,
+        }
+    }
+
+    fn sample_track(id: &str, title: &str, album_id: Option<&str>, artist_id: Option<&str>) -> Track {
+        Track {
+            id: TrackId(id.to_string()),
+            title: title.to_string(),
+            sort_title: None,
+            album_id: album_id.map(|s| AlbumId(s.to_string())),
+            album_title: album_id.map(|_| "Test Album".to_string()),
+            artist_id: artist_id.map(|s| ArtistId(s.to_string())),
+            artist_name: artist_id.map(|_| "Test Artist".to_string()),
+            disc_number: Some(1),
+            track_number: Some(1),
+            duration_secs: Some(180),
+            bitrate: None,
+            format: None,
+            cover_art_id: Some(CoverArtId("cover-1".to_string())),
+            has_lyrics: false,
+            play_count: 0,
+            last_played_at: None,
+            is_favorite: false,
+        }
+    }
+
+    #[test]
+    fn test_artist_upsert_and_load() {
+        let db = open_in_memory("srv1");
+        let artists = vec![
+            sample_artist("a1", "Alpha"),
+            sample_artist("a2", "Beta"),
+        ];
+
+        db.upsert_artists(&artists).unwrap();
+        let loaded = db.load_artists().unwrap();
+
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].id.0, "a1");
+        assert_eq!(loaded[1].id.0, "a2");
+        assert_eq!(db.artist_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_album_upsert_and_load_with_foreign_key() {
+        let db = open_in_memory("srv1");
+        let artists = vec![sample_artist("a1", "Artist One")];
+        let albums = vec![
+            sample_album("al1", "Album One", Some("a1")),
+            sample_album("al2", "Album Two", None),
+        ];
+
+        db.upsert_artists(&artists).unwrap();
+        db.upsert_albums(&albums).unwrap();
+        let loaded = db.load_albums().unwrap();
+
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].id.0, "al1");
+        assert_eq!(loaded[0].artist_id.as_ref().unwrap().0, "a1");
+        assert_eq!(loaded[0].artist_name.as_ref().unwrap(), "Test Artist");
+        assert!(loaded[1].artist_id.is_none());
+    }
+
+    #[test]
+    fn test_track_upsert_and_load_with_relationships() {
+        let db = open_in_memory("srv1");
+        let artists = vec![sample_artist("a1", "Artist One")];
+        let albums = vec![sample_album("al1", "Album One", Some("a1"))];
+        let tracks = vec![
+            sample_track("t1", "Track One", Some("al1"), Some("a1")),
+            sample_track("t2", "Track Two", None, None),
+        ];
+
+        db.upsert_artists(&artists).unwrap();
+        db.upsert_albums(&albums).unwrap();
+        db.upsert_tracks(&tracks).unwrap();
+        let loaded = db.load_tracks().unwrap();
+
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].id.0, "t1");
+        assert_eq!(loaded[0].album_id.as_ref().unwrap().0, "al1");
+        assert_eq!(loaded[0].artist_id.as_ref().unwrap().0, "a1");
+        assert_eq!(loaded[0].duration_secs, Some(180));
+        assert!(loaded[1].album_id.is_none());
+        assert!(loaded[1].artist_id.is_none());
+    }
+
+    #[test]
+    fn test_server_isolation() {
+        let db1 = open_in_memory("srv1");
+        let db2 = open_in_memory("srv2");
+
+        db1.upsert_artists(&[sample_artist("a1", "Srv1 Artist")]).unwrap();
+        db2.upsert_artists(&[sample_artist("a1", "Srv2 Artist")]).unwrap();
+
+        let loaded1 = db1.load_artists().unwrap();
+        let loaded2 = db2.load_artists().unwrap();
+
+        assert_eq!(loaded1.len(), 1);
+        assert_eq!(loaded1[0].name, "Srv1 Artist");
+        assert_eq!(loaded2.len(), 1);
+        assert_eq!(loaded2[0].name, "Srv2 Artist");
+    }
+
+    #[test]
+    fn test_meta_roundtrip() {
+        let db = open_in_memory("srv1");
+        db.set_meta("last_sync", "2024-01-01T00:00:00Z").unwrap();
+        let val = db.get_meta("last_sync").unwrap();
+        assert_eq!(val, Some("2024-01-01T00:00:00Z".to_string()));
+
+        db.set_meta("last_sync", "2024-02-01T00:00:00Z").unwrap();
+        let val = db.get_meta("last_sync").unwrap();
+        assert_eq!(val, Some("2024-02-01T00:00:00Z".to_string()));
+    }
+
+    #[test]
+    fn test_upsert_overwrites_existing() {
+        let db = open_in_memory("srv1");
+        let artist1 = sample_artist("a1", "Original");
+        let artist2 = sample_artist("a1", "Updated");
+
+        db.upsert_artists(&[artist1]).unwrap();
+        db.upsert_artists(&[artist2]).unwrap();
+
+        let loaded = db.load_artists().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "Updated");
     }
 }

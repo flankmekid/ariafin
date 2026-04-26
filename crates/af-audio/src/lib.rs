@@ -1,7 +1,7 @@
 //! Audio playback engine — streaming download, Symphonia decoding, cpal output.
 
 use std::io;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -73,11 +73,11 @@ impl io::Read for GrowingReader {
     fn read(&mut self, dst: &mut [u8]) -> io::Result<usize> {
         if dst.is_empty() { return Ok(0); }
         loop {
-            if self.shared.lock().unwrap().epoch != self.my_epoch {
+            if self.shared.lock().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Lock poisoned: {e}")))?.epoch != self.my_epoch {
                 return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
             }
             {
-                let dl = self.buf.lock().unwrap();
+                let dl = self.buf.lock().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Lock poisoned: {e}")))?;
                 if let Some(ref e) = dl.error {
                     return Err(io::Error::new(io::ErrorKind::Other, e.clone()));
                 }
@@ -105,10 +105,10 @@ impl io::Seek for GrowingReader {
                 // This only happens for container formats (M4A) whose index is
                 // at the end; for FLAC / OGG / MP3 this branch is never taken.
                 loop {
-                    if self.shared.lock().unwrap().epoch != self.my_epoch {
+                    if self.shared.lock().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Lock poisoned: {e}")))?.epoch != self.my_epoch {
                         return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
                     }
-                    let dl = self.buf.lock().unwrap();
+                    let dl = self.buf.lock().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Lock poisoned: {e}")))?;
                     if dl.done {
                         let end = dl.data.len() as i64;
                         let p   = (end + n).max(0) as usize;
@@ -123,10 +123,10 @@ impl io::Seek for GrowingReader {
         };
         // For a forward seek: wait until enough bytes are available.
         loop {
-            if self.shared.lock().unwrap().epoch != self.my_epoch {
+            if self.shared.lock().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Lock poisoned: {e}")))?.epoch != self.my_epoch {
                 return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
             }
-            let dl = self.buf.lock().unwrap();
+            let dl = self.buf.lock().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Lock poisoned: {e}")))?;
             if new_pos <= dl.data.len() || dl.done { break; }
             drop(dl);
             std::thread::sleep(Duration::from_millis(10));
@@ -139,24 +139,45 @@ impl io::Seek for GrowingReader {
 impl symphonia::core::io::MediaSource for GrowingReader {
     fn is_seekable(&self) -> bool { true }
     fn byte_len(&self) -> Option<u64> {
-        let dl = self.buf.lock().unwrap();
+        let dl = self.buf.lock().unwrap_or_else(|e| e.into_inner());
         if dl.done { Some(dl.data.len() as u64) } else { None }
     }
 }
 
+// ── Helpers for graceful mutex locking ────────────────────────────────────────
+
+fn lock_state(shared: &Arc<Mutex<SharedState>>) -> MutexGuard<'_, SharedState> {
+    shared.lock().unwrap_or_else(|e| {
+        tracing::error!("SharedState mutex poisoned: {e}");
+        e.into_inner()
+    })
+}
+
+fn lock_dl(dl: &Arc<Mutex<DownloadBuf>>) -> MutexGuard<'_, DownloadBuf> {
+    dl.lock().unwrap_or_else(|e| {
+        tracing::error!("DownloadBuf mutex poisoned: {e}");
+        e.into_inner()
+    })
+}
+
 // ── Public entry point ────────────────────────────────────────────────────────
 
-pub fn spawn(cmd_rx: mpsc::Receiver<PlaybackCommand>, event_tx: mpsc::Sender<AudioEvent>) {
+pub fn spawn(cmd_rx: mpsc::Receiver<PlaybackCommand>, event_tx: mpsc::Sender<AudioEvent>) -> anyhow::Result<()> {
     std::thread::Builder::new()
         .name("af-audio".into())
         .spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
+            match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .expect("audio runtime");
-            rt.block_on(audio_main(cmd_rx, event_tx));
+            {
+                Ok(rt) => rt.block_on(audio_main(cmd_rx, event_tx)),
+                Err(e) => {
+                    let _ = event_tx.blocking_send(AudioEvent::Error(format!("Audio runtime error: {e}")));
+                }
+            }
         })
-        .expect("spawn audio thread");
+        .map_err(|e| anyhow::anyhow!("Failed to spawn audio thread: {e}"))?;
+    Ok(())
 }
 
 // ── Audio main loop ───────────────────────────────────────────────────────────
@@ -214,7 +235,7 @@ async fn audio_main(
         loop {
             interval.tick().await;
             let (position, duration, playing, done) = {
-                let mut st = shared_tick.lock().unwrap();
+                let mut st = lock_state(&shared_tick);
                 let pos  = st.position();
                 let dur  = st.total_duration();
                 let play = st.playing;
@@ -237,7 +258,7 @@ async fn audio_main(
                 // Bump epoch — all in-flight tasks for the old epoch will see the
                 // mismatch and stop without writing to SharedState.
                 let my_epoch = {
-                    let mut st = shared.lock().unwrap();
+                    let mut st = lock_state(&shared);
                     st.epoch = st.epoch.wrapping_add(1);
                     st.playing = false;
                     st.samples.clear();
@@ -265,12 +286,12 @@ async fn audio_main(
                             .error_for_status()?;
                         let mut stream = resp.bytes_stream();
                         while let Some(chunk) = stream.next().await {
-                            if shared_dl.lock().unwrap().epoch != my_epoch { break; }
-                            dl_buf.lock().unwrap().data.extend_from_slice(&chunk?);
+                            if lock_state(&shared_dl).epoch != my_epoch { break; }
+                            lock_dl(&dl_buf).data.extend_from_slice(&chunk?);
                         }
                         Ok(())
                     }.await;
-                    let mut dl = dl_buf.lock().unwrap();
+                    let mut dl = lock_dl(&dl_buf);
                     if let Err(e) = result {
                         dl.error = Some(e.to_string());
                     }
@@ -290,7 +311,7 @@ async fn audio_main(
 
             PlaybackCommand::Stop => {
                 {
-                    let mut st = shared.lock().unwrap();
+                    let mut st = lock_state(&shared);
                     st.epoch = st.epoch.wrapping_add(1);
                     st.playing = false;
                     st.samples.clear();
@@ -301,13 +322,13 @@ async fn audio_main(
             }
 
             PlaybackCommand::Pause => {
-                shared.lock().unwrap().playing = false;
+                lock_state(&shared).playing = false;
                 let _ = event_tx.send(AudioEvent::StateChanged { is_playing: false }).await;
             }
 
             PlaybackCommand::Resume => {
                 let ok = {
-                    let mut st = shared.lock().unwrap();
+                    let mut st = lock_state(&shared);
                     if !st.samples.is_empty() && st.pos < st.samples.len() {
                         st.playing = true;
                         true
@@ -319,7 +340,7 @@ async fn audio_main(
             }
 
             PlaybackCommand::Seek(pos) => {
-                let mut st = shared.lock().unwrap();
+                let mut st = lock_state(&shared);
                 if !st.samples.is_empty() {
                     let target = (pos.as_secs_f64()
                         * st.sample_rate as f64
@@ -329,11 +350,11 @@ async fn audio_main(
             }
 
             PlaybackCommand::SetVolume(v) => {
-                shared.lock().unwrap().volume = v as f32 / 100.0;
+                lock_state(&shared).volume = v as f32 / 100.0;
             }
 
             PlaybackCommand::Next | PlaybackCommand::Previous => {
-                shared.lock().unwrap().playing = false;
+                lock_state(&shared).playing = false;
             }
         }
     }
@@ -379,7 +400,7 @@ fn decode_progressive(
     ) {
         Ok(p) => p,
         Err(e) => {
-            if shared.lock().unwrap().epoch == my_epoch {
+            if lock_state(&shared).epoch == my_epoch {
                 let _ = event_tx.blocking_send(
                     AudioEvent::Error(format!("Format: {e}")));
             }
@@ -391,7 +412,7 @@ fn decode_progressive(
     let track = match format.default_track() {
         Some(t) => t,
         None => {
-            if shared.lock().unwrap().epoch == my_epoch {
+            if lock_state(&shared).epoch == my_epoch {
                 let _ = event_tx.blocking_send(
                     AudioEvent::Error("No audio track".into()));
             }
@@ -408,7 +429,7 @@ fn decode_progressive(
     {
         Ok(d) => d,
         Err(e) => {
-            if shared.lock().unwrap().epoch == my_epoch {
+            if lock_state(&shared).epoch == my_epoch {
                 let _ = event_tx.blocking_send(
                     AudioEvent::Error(format!("Codec: {e}")));
             }
@@ -421,7 +442,7 @@ fn decode_progressive(
     let mut started = false;
 
     loop {
-        if shared.lock().unwrap().epoch != my_epoch { return; }
+        if lock_state(&shared).epoch != my_epoch { return; }
 
         let packet = match format.next_packet() {
             Ok(p)  => p,
@@ -429,7 +450,7 @@ fn decode_progressive(
             Err(SE::IoError(e)) if e.kind() == io::ErrorKind::Interrupted   => return,
             Err(SE::ResetRequired) => { decoder.reset(); continue; }
             Err(e) => {
-                if shared.lock().unwrap().epoch == my_epoch {
+                if lock_state(&shared).epoch == my_epoch {
                     let _ = event_tx.blocking_send(
                         AudioEvent::Error(format!("Packet: {e}")));
                 }
@@ -443,7 +464,7 @@ fn decode_progressive(
             Ok(b)  => b,
             Err(SE::IoError(_) | SE::DecodeError(_)) => continue,
             Err(e) => {
-                if shared.lock().unwrap().epoch == my_epoch {
+                if lock_state(&shared).epoch == my_epoch {
                     let _ = event_tx.blocking_send(
                         AudioEvent::Error(format!("Decode: {e}")));
                 }
@@ -461,7 +482,7 @@ fn decode_progressive(
         }
 
         let total = {
-            let mut st = shared.lock().unwrap();
+            let mut st = lock_state(&shared);
             if st.epoch != my_epoch { return; }
             st.samples.extend_from_slice(&new_samples);
             st.samples.len()
@@ -470,7 +491,7 @@ fn decode_progressive(
         if !started && total >= prebuffer {
             started = true;
             {
-                let mut st = shared.lock().unwrap();
+                let mut st = lock_state(&shared);
                 if st.epoch != my_epoch { return; }
                 st.playing = true;
             }
@@ -483,7 +504,7 @@ fn decode_progressive(
     // (e.g. very short track).
     if !started {
         let has = {
-            let mut st = shared.lock().unwrap();
+            let mut st = lock_state(&shared);
             if st.epoch != my_epoch { return; }
             if !st.samples.is_empty() { st.playing = true; true } else { false }
         };
@@ -553,7 +574,7 @@ fn build_stream(
 }
 
 fn fill_f32(data: &mut [f32], shared: &Arc<Mutex<SharedState>>) {
-    let mut st = shared.lock().unwrap();
+    let mut st = lock_state(shared);
     for sample in data.iter_mut() {
         if st.playing && st.pos < st.samples.len() {
             *sample = st.samples[st.pos] * st.volume;

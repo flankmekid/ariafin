@@ -61,5 +61,8 @@ async-trait  = "0.1"
 futures      = "0.3"
 urlencoding  = "2"
 
+# Secrets management
+keyring = "2.0"
+
 # CLI
 clap = { version = "4", features = ["derive"] }

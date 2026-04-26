@@ -15,7 +15,7 @@ pub struct JellyfinClient {
 }
 
 impl JellyfinClient {
-    pub fn new(name: impl Into<String>, base_url: impl Into<String>) -> Self {
+    pub fn new(name: impl Into<String>, base_url: impl Into<String>) -> Result<Self, ApiError> {
         let raw = base_url.into();
         let raw = raw.trim_end_matches('/');
         let base_url = if raw.starts_with("http://") || raw.starts_with("https://") {
@@ -23,15 +23,14 @@ impl JellyfinClient {
         } else {
             format!("http://{raw}")
         };
-        Self {
+        Ok(Self {
             name: name.into(),
             device_id: stable_device_id(),
             base_url,
             client: Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("failed to build reqwest client"),
-        }
+                .build()?,
+        })
     }
 
     /// `X-Emby-Authorization` header value (token is None before login).

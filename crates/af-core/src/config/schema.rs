@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_VERSION: u32 = 1;
+pub const CURRENT_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -36,11 +36,6 @@ pub struct ServerConfig {
     pub server_type: ServerType,
     pub base_url: String,
     pub username: String,
-    // Token stored here for Phase 2 convenience; keyring integration in Phase 3.
-    #[serde(default)]
-    pub token: Option<String>,
-    #[serde(default)]
-    pub user_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
